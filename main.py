@@ -8,9 +8,9 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
 
-# ---------------------------------
+# =====================================================
 # 페이지 설정
-# ---------------------------------
+# =====================================================
 st.set_page_config(
     page_title="선수 유형 나누기",
     page_icon="⚽",
@@ -18,12 +18,15 @@ st.set_page_config(
 )
 
 st.title("⚽ 선수 유형 나누기")
-st.caption("축구 게임 선수들의 능력치를 바탕으로 K-평균 군집화를 수행합니다.")
+st.caption(
+    "선수들의 능력치를 바탕으로 공격수·미드필더·수비수 유형을 "
+    "K-평균으로 나눕니다."
+)
 
 
-# ---------------------------------
+# =====================================================
 # 데이터 불러오기
-# ---------------------------------
+# =====================================================
 DATA_URL = (
     "https://raw.githubusercontent.com/greatsong/modudata/main/data/"
     "eafc25_top100.csv"
@@ -54,21 +57,22 @@ required_columns = [
 ]
 
 missing_columns = [
-    column for column in required_columns
+    column
+    for column in required_columns
     if column not in df.columns
 ]
 
 if missing_columns:
     st.error(
-        "다음 필수 열이 데이터에 없습니다: "
+        "다음 필수 열이 없습니다: "
         + ", ".join(missing_columns)
     )
     st.stop()
 
 
-# ---------------------------------
+# =====================================================
 # 능력치 이름
-# ---------------------------------
+# =====================================================
 ability_columns = {
     "pace": "속도",
     "shooting": "슈팅",
@@ -86,9 +90,9 @@ display_to_data_column = {
 }
 
 
-# ---------------------------------
+# =====================================================
 # 숫자형 변환
-# ---------------------------------
+# =====================================================
 number_columns = [
     "overall",
     "pace",
@@ -103,21 +107,29 @@ number_columns = [
 ]
 
 for column in number_columns:
-    df[column] = pd.to_numeric(df[column], errors="coerce")
+    df[column] = pd.to_numeric(
+        df[column],
+        errors="coerce",
+    )
 
+
+# =====================================================
+# 분석 데이터 준비
+# =====================================================
+ability_data_columns = list(ability_columns.keys())
 
 analysis_df = df.dropna(
-    subset=list(ability_columns.keys()) + ["overall", "name_ko"]
+    subset=ability_data_columns + ["overall", "name_ko"]
 ).copy()
 
 if len(analysis_df) < 7:
-    st.error("분석할 선수가 7명보다 적습니다.")
+    st.error("분석할 수 있는 선수가 7명보다 적습니다.")
     st.stop()
 
 
-# ---------------------------------
+# =====================================================
 # 분석 설정
-# ---------------------------------
+# =====================================================
 st.subheader("1. 분석 설정")
 
 selected_abilities = st.multiselect(
@@ -140,14 +152,15 @@ selected_cluster_count = st.slider(
 )
 
 
-# ---------------------------------
-# 선택한 능력치 표준화
-# ---------------------------------
 selected_data_columns = [
     display_to_data_column[ability]
     for ability in selected_abilities
 ]
 
+
+# =====================================================
+# 선택한 능력치 표준화
+# =====================================================
 scaler = StandardScaler()
 
 scaled_values = scaler.fit_transform(
@@ -155,61 +168,161 @@ scaled_values = scaler.fit_transform(
 )
 
 
-# ---------------------------------
-# 묶음 기호
-# ---------------------------------
-cluster_symbols = [
-    "㉮",
-    "㉯",
-    "㉰",
-    "㉱",
-    "㉲",
-    "㉳",
-    "㉴",
-]
-
-
-# ---------------------------------
-# 현재 선택한 묶음 수로 군집화
-# ---------------------------------
-selected_kmeans = KMeans(
+# =====================================================
+# 현재 묶음 수로 K-평균 실행
+# =====================================================
+current_kmeans = KMeans(
     n_clusters=selected_cluster_count,
     random_state=42,
     n_init=10,
 )
 
-selected_cluster_numbers = selected_kmeans.fit_predict(
+analysis_df["cluster_raw"] = current_kmeans.fit_predict(
     scaled_values
 )
 
-analysis_df["cluster_raw"] = selected_cluster_numbers
 
+# =====================================================
+# 선수 유형 이름 정하기
+# =====================================================
+all_ability_columns = [
+    "pace",
+    "shooting",
+    "passing",
+    "dribbling",
+    "defending",
+    "physic",
+]
 
-# 슈팅 평균이 높은 묶음부터 기호 부여
-shooting_means = (
+cluster_means = (
     analysis_df
-    .groupby("cluster_raw")["shooting"]
+    .groupby("cluster_raw")[all_ability_columns]
     .mean()
-    .sort_values(ascending=False)
 )
 
-cluster_order = shooting_means.index.tolist()
+# 묶음별 능력치 평균을 표준화하여 유형 점수 계산
+cluster_mean_scaler = StandardScaler()
 
-cluster_label_map = {
-    raw_cluster: cluster_symbols[index]
-    for index, raw_cluster in enumerate(cluster_order)
-}
-
-analysis_df["묶음"] = analysis_df["cluster_raw"].map(
-    cluster_label_map
+cluster_means_scaled = pd.DataFrame(
+    cluster_mean_scaler.fit_transform(cluster_means),
+    index=cluster_means.index,
+    columns=all_ability_columns,
 )
 
-ordered_labels = cluster_symbols[:selected_cluster_count]
+# 공격수: 속도와 슈팅이 높음
+cluster_means_scaled["공격수 점수"] = (
+    cluster_means_scaled["pace"]
+    + cluster_means_scaled["shooting"]
+)
+
+# 수비수: 수비와 속도가 높음
+cluster_means_scaled["수비수 점수"] = (
+    cluster_means_scaled["defending"]
+    + cluster_means_scaled["pace"]
+)
+
+# 미드필더:
+# 여섯 능력치가 서로 비슷할수록 표준편차가 작음
+# 따라서 표준편차에 -를 붙여 점수가 높을수록 고른 유형
+cluster_means_scaled["미드필더 점수"] = (
+    -cluster_means_scaled[all_ability_columns].std(axis=1)
+)
 
 
-# ---------------------------------
+# 유형을 배정하는 함수
+def assign_roles(cluster_score_df):
+    """
+    군집별 공격수·미드필더·수비수 점수를 비교하여
+    각 군집에 유형을 배정합니다.
+
+    묶음 수가 3개보다 많으면 기본 유형 3개를 먼저 배정하고,
+    나머지는 기타 유형으로 표시합니다.
+    """
+
+    raw_clusters = list(cluster_score_df.index)
+
+    role_score_columns = {
+        "공격수": "공격수 점수",
+        "미드필더": "미드필더 점수",
+        "수비수": "수비수 점수",
+    }
+
+    role_map = {}
+    unused_clusters = set(raw_clusters)
+
+    # 역할별 최고 점수 군집을 차례로 배정합니다.
+    # 한 군집이 여러 역할을 차지하지 않도록 합니다.
+    role_priority = [
+        "공격수",
+        "미드필더",
+        "수비수",
+    ]
+
+    for role in role_priority:
+        available_clusters = list(unused_clusters)
+
+        if not available_clusters:
+            break
+
+        score_column = role_score_columns[role]
+
+        best_cluster = max(
+            available_clusters,
+            key=lambda cluster: cluster_score_df.loc[
+                cluster,
+                score_column,
+            ],
+        )
+
+        role_map[best_cluster] = role
+        unused_clusters.remove(best_cluster)
+
+    # 3개보다 많은 묶음은 기타 유형으로 표시합니다.
+    other_number = 1
+
+    for cluster in raw_clusters:
+        if cluster not in role_map:
+            role_map[cluster] = f"기타 유형 {other_number}"
+            other_number += 1
+
+    return role_map
+
+
+cluster_role_map = assign_roles(cluster_means_scaled)
+
+analysis_df["선수 유형"] = analysis_df["cluster_raw"].map(
+    cluster_role_map
+)
+
+
+# =====================================================
+# 유형 표시 순서
+# =====================================================
+role_order = [
+    "공격수",
+    "미드필더",
+    "수비수",
+]
+
+other_roles = sorted(
+    [
+        role
+        for role in analysis_df["선수 유형"].unique()
+        if role.startswith("기타 유형")
+    ],
+    key=lambda value: int(value.split()[-1]),
+)
+
+ordered_role_names = [
+    role
+    for role in role_order
+    if role in analysis_df["선수 유형"].unique()
+] + other_roles
+
+
+# =====================================================
 # 기본 정보
-# ---------------------------------
+# =====================================================
 st.subheader("2. 분석 결과")
 
 info_col1, info_col2, info_col3 = st.columns(3)
@@ -223,10 +336,15 @@ with info_col2:
 with info_col3:
     st.metric("현재 묶음 수", f"{selected_cluster_count}개")
 
+st.info(
+    "공격수는 속도와 슈팅, 수비수는 수비와 속도, "
+    "미드필더는 여섯 능력치가 서로 고른 정도를 기준으로 정했습니다."
+)
 
-# ---------------------------------
+
+# =====================================================
 # 2차원 산점도
-# ---------------------------------
+# =====================================================
 st.subheader("3. 2차원 산점도")
 
 axis_col1, axis_col2 = st.columns(2)
@@ -254,38 +372,46 @@ fig_2d = px.scatter(
     analysis_df,
     x=x_data_column,
     y=y_data_column,
-    color="묶음",
-    category_orders={"묶음": ordered_labels},
+    color="선수 유형",
+    category_orders={
+        "선수 유형": ordered_role_names
+    },
     hover_name="name_ko",
     hover_data={
         "name_ko": True,
-        "묶음": True,
+        "선수 유형": True,
         x_data_column: True,
         y_data_column: True,
     },
     labels={
         x_data_column: x_axis,
         y_data_column: y_axis,
-        "묶음": "선수 유형",
+        "선수 유형": "선수 유형",
         "name_ko": "한글 이름",
     },
     title=f"{x_axis}와 {y_axis}에 따른 선수 유형",
 )
 
-fig_2d.update_traces(marker={"size": 9})
-fig_2d.update_layout(legend_title_text="선수 유형")
+fig_2d.update_traces(
+    marker={
+        "size": 9,
+    }
+)
 
-st.plotly_chart(fig_2d, use_container_width=True)
+st.plotly_chart(
+    fig_2d,
+    use_container_width=True,
+)
 
 
-# ---------------------------------
+# =====================================================
 # 3차원 산점도
-# ---------------------------------
+# =====================================================
 st.subheader("4. 3차원 산점도")
 
 if len(selected_abilities) < 3:
     st.info(
-        "3차원 산점도를 표시하려면 능력치를 세 개 이상 선택해야 합니다."
+        "3차원 산점도를 표시하려면 능력치를 세 개 이상 선택하세요."
     )
 else:
     axis3d_col1, axis3d_col2, axis3d_col3 = st.columns(3)
@@ -323,12 +449,14 @@ else:
         x=x_data_column_3d,
         y=y_data_column_3d,
         z=z_data_column_3d,
-        color="묶음",
-        category_orders={"묶음": ordered_labels},
+        color="선수 유형",
+        category_orders={
+            "선수 유형": ordered_role_names
+        },
         hover_name="name_ko",
         hover_data={
             "name_ko": True,
-            "묶음": True,
+            "선수 유형": True,
             x_data_column_3d: True,
             y_data_column_3d: True,
             z_data_column_3d: True,
@@ -337,7 +465,7 @@ else:
             x_data_column_3d: x_axis_3d,
             y_data_column_3d: y_axis_3d,
             z_data_column_3d: z_axis_3d,
-            "묶음": "선수 유형",
+            "선수 유형": "선수 유형",
             "name_ko": "한글 이름",
         },
         title=(
@@ -354,29 +482,33 @@ else:
     )
 
     fig_3d.update_layout(
-        legend_title_text="선수 유형",
         scene={
             "xaxis_title": x_axis_3d,
             "yaxis_title": y_axis_3d,
             "zaxis_title": z_axis_3d,
-        },
+        }
     )
 
-    st.plotly_chart(fig_3d, use_container_width=True)
+    st.plotly_chart(
+        fig_3d,
+        use_container_width=True,
+    )
 
 
-# ---------------------------------
-# 묶음별 평균 표
-# ---------------------------------
-st.subheader("5. 묶음별 능력치 평균")
+# =====================================================
+# 유형별 능력치 평균
+# =====================================================
+st.subheader("5. 유형별 능력치 평균")
 
 summary_rows = []
 
-for label in ordered_labels:
-    group = analysis_df[analysis_df["묶음"] == label]
+for role in ordered_role_names:
+    group = analysis_df[
+        analysis_df["선수 유형"] == role
+    ]
 
     row = {
-        "묶음": label,
+        "선수 유형": role,
         "인원": len(group),
     }
 
@@ -399,27 +531,33 @@ st.dataframe(
 )
 
 
-# ---------------------------------
-# 묶음별 종합 능력치 상위 선수
-# ---------------------------------
-st.subheader("6. 묶음별 종합 능력치가 높은 선수 5명")
+# =====================================================
+# 유형별 종합 능력치 상위 선수
+# =====================================================
+st.subheader("6. 유형별 종합 능력치가 높은 선수 5명")
 
 top_player_rows = []
 
-for label in ordered_labels:
+for role in ordered_role_names:
     group = (
-        analysis_df[analysis_df["묶음"] == label]
+        analysis_df[
+            analysis_df["선수 유형"] == role
+        ]
         .sort_values("overall", ascending=False)
         .head(5)
     )
 
     names = group["name_ko"].tolist()
 
-    row = {"묶음": label}
+    row = {
+        "선수 유형": role,
+    }
 
     for rank in range(5):
         row[f"{rank + 1}위"] = (
-            names[rank] if rank < len(names) else ""
+            names[rank]
+            if rank < len(names)
+            else ""
         )
 
     top_player_rows.append(row)
@@ -433,30 +571,54 @@ st.dataframe(
 )
 
 
-# ---------------------------------
+# =====================================================
 # 포지션 분류
-# ---------------------------------
+# =====================================================
 def classify_position(position_text):
-    """positions 열의 맨 앞 포지션을 세 가지로 분류합니다."""
+    """
+    positions 열의 맨 앞 포지션을 기준으로
+    공격수·미드필더·수비수로 분류합니다.
+    """
 
     if pd.isna(position_text):
         return "수비수"
 
-    first_position = str(position_text).split(",")[0].strip()
-    first_position = first_position.split("/")[0].strip()
-    first_position = first_position.upper()
+    first_position = str(position_text).strip()
+
+    # 데이터가 쉼표나 슬래시로 구분되어 있을 때
+    first_position = first_position.split(",")[0]
+    first_position = first_position.split("/")[0]
+    first_position = first_position.strip().upper()
 
     attacker_positions = {
-        "ST", "CF", "LW", "RW", "LF", "RF"
+        "ST",
+        "CF",
+        "LW",
+        "RW",
+        "LF",
+        "RF",
     }
 
     midfielder_positions = {
-        "CAM", "CM", "CDM", "LM", "RM",
-        "LAM", "RAM", "LDM", "RDM"
+        "CAM",
+        "CM",
+        "CDM",
+        "LM",
+        "RM",
+        "LAM",
+        "RAM",
+        "LDM",
+        "RDM",
     }
 
     defender_positions = {
-        "CB", "LB", "RB", "LWB", "RWB", "SW", "GK"
+        "CB",
+        "LB",
+        "RB",
+        "LWB",
+        "RWB",
+        "SW",
+        "GK",
     }
 
     if first_position in attacker_positions:
@@ -471,15 +633,15 @@ def classify_position(position_text):
     return "수비수"
 
 
-analysis_df["포지션 분류"] = analysis_df["positions"].apply(
-    classify_position
-)
+analysis_df["포지션 분류"] = analysis_df[
+    "positions"
+].apply(classify_position)
 
 
-# ---------------------------------
-# 묶음과 포지션 교차표
-# ---------------------------------
-st.subheader("7. 묶음과 포지션의 교차표")
+# =====================================================
+# 유형과 포지션 교차표
+# =====================================================
+st.subheader("7. 선수 유형과 포지션 교차표")
 
 position_order = [
     "공격수",
@@ -488,12 +650,12 @@ position_order = [
 ]
 
 crosstab_df = pd.crosstab(
-    analysis_df["묶음"],
+    analysis_df["선수 유형"],
     analysis_df["포지션 분류"],
 )
 
 crosstab_df = crosstab_df.reindex(
-    index=ordered_labels,
+    index=ordered_role_names,
     columns=position_order,
     fill_value=0,
 )
@@ -516,10 +678,10 @@ st.dataframe(
 )
 
 
-# ---------------------------------
+# =====================================================
 # 묶음 수별 군집 내 제곱거리 합
-# ---------------------------------
-st.subheader("8. 묶음 수에 따른 군집 내 제곱거리 합")
+# =====================================================
+st.subheader("8. 묶음 수별 군집 내 제곱거리 합")
 
 inertia_rows = []
 
@@ -576,12 +738,12 @@ fig_inertia.update_layout(
     },
 )
 
-st.plotly_chart(fig_inertia, use_container_width=True)
+st.plotly_chart(
+    fig_inertia,
+    use_container_width=True,
+)
 
 
-# ---------------------------------
-# 제곱거리 합과 감소량 표
-# ---------------------------------
 inertia_table_df = inertia_df.copy()
 
 inertia_table_df["바로 앞 값에서 감소한 값"] = (
@@ -589,7 +751,6 @@ inertia_table_df["바로 앞 값에서 감소한 값"] = (
     - inertia_table_df["군집 내 제곱거리 합"]
 )
 
-# 첫 줄은 비교할 앞 값이 없으므로 빈칸
 inertia_table_df.loc[
     inertia_table_df.index[0],
     "바로 앞 값에서 감소한 값",
@@ -610,9 +771,9 @@ st.dataframe(
 )
 
 
-# ---------------------------------
-# 실루엣 점수 계산
-# ---------------------------------
+# =====================================================
+# 실루엣 점수
+# =====================================================
 st.subheader("9. 묶음 수별 실루엣 점수")
 
 silhouette_rows = []
@@ -680,12 +841,12 @@ fig_silhouette.update_layout(
     },
 )
 
-st.plotly_chart(fig_silhouette, use_container_width=True)
+st.plotly_chart(
+    fig_silhouette,
+    use_container_width=True,
+)
 
 
-# ---------------------------------
-# 실루엣 점수 표
-# ---------------------------------
 silhouette_table_df = silhouette_df.copy()
 
 silhouette_table_df["실루엣 점수"] = (
